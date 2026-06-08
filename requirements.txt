@@ -1,0 +1,10 @@
+streamlit
+fastf1
+pandas
+numpy
+plotly
+scikit-learn
+joblib
+matplotlib
+seaborn
+requests
