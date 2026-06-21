@@ -3,7 +3,7 @@ fastf1
 pandas
 numpy
 plotly
-scikit-learn==1.6.1
+scikit-learn>=1.6,<1.7
 joblib
 matplotlib
 seaborn
