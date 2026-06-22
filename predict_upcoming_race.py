@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 MODEL_PATH = "f1_race_predictor.pkl"
 HIST_PATH  = "historical_features.parquet"
 
-# ── 2026 driver lineup (fallback if FastF1 data unavailable) ──────────────
-FALLBACK_DRIVERS = [
+# 2026 F1 driver lineup — used when qualifying hasn't happened yet
+DRIVERS_2026 = [
     {"Abbreviation": "VER", "TeamName": "Red Bull Racing"},
     {"Abbreviation": "LAW", "TeamName": "Red Bull Racing"},
     {"Abbreviation": "NOR", "TeamName": "McLaren"},
@@ -60,32 +60,6 @@ def get_next_event(year):
     return upcoming.sort_values("EventDate").iloc[0]
 
 
-@st.cache_data(show_spinner=False)
-def get_current_drivers(year, next_round):
-    """
-    Try to get the driver/team list from the most recent completed race.
-    Falls back to FALLBACK_DRIVERS if nothing is available.
-    """
-    try:
-        schedule = fastf1.get_event_schedule(year, include_testing=False)
-        schedule = schedule[schedule["EventFormat"] != "testing"]
-        past = schedule[schedule["RoundNumber"] < next_round].sort_values(
-            "RoundNumber", ascending=False
-        )
-        for _, ev in past.iterrows():
-            try:
-                s = fastf1.get_session(year, int(ev["RoundNumber"]), "R")
-                s.load(laps=False, telemetry=False, weather=False, messages=False)
-                res = s.results[["Abbreviation", "TeamName"]].dropna()
-                if not res.empty:
-                    return res.drop_duplicates("Abbreviation").reset_index(drop=True), False
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return pd.DataFrame(FALLBACK_DRIVERS), False
-
-
 def try_get_grid(year, rnd):
     """Real qualifying grid if available, else None."""
     try:
@@ -93,17 +67,16 @@ def try_get_grid(year, rnd):
         q.load(laps=False, telemetry=False, weather=False, messages=False)
         res = q.results[["Abbreviation", "TeamName", "Position"]].copy()
         res = res.rename(columns={"Position": "GridPosition"})
-        return res.dropna(subset=["Abbreviation"])
+        res = res.dropna(subset=["Abbreviation"])
+        return res if not res.empty else None
     except Exception:
         return None
 
 
 def _latest_stat(hist_df, key_col, key_val, col):
-    if col not in hist_df.columns:
+    if col not in hist_df.columns or key_col not in hist_df.columns:
         return np.nan
-    rows = hist_df[hist_df[key_col] == key_val].sort_values(
-        [c for c in ["Year", "Round"] if c in hist_df.columns]
-    )
+    rows = hist_df[hist_df[key_col] == key_val]
     if rows.empty:
         return np.nan
     val = rows[col].dropna()
@@ -115,51 +88,48 @@ def build_prediction_table(event, hist_df):
     rnd        = int(event["RoundNumber"])
     event_name = event["EventName"]
 
-    # Try real qualifying grid first
+    # Try real qualifying grid
     grid_df    = try_get_grid(year, rnd)
     quali_done = grid_df is not None
 
     if not quali_done:
-        # Get current driver lineup from most recent race
-        drivers_df, _ = get_current_drivers(year, rnd)
-        grid_df = drivers_df.copy()
-        # Estimate grid from recent qualifying form
-        grid_df["GridPosition"] = grid_df["Abbreviation"].apply(
-            lambda a: _latest_stat(hist_df, "Abbreviation", a, "DriverAvgGridLast5")
-        )
-        # Fill any missing grid positions with midfield default
-        grid_df["GridPosition"] = pd.to_numeric(
-            grid_df["GridPosition"], errors="coerce"
-        ).fillna(10.0)
+        # Use hardcoded 2026 lineup — reliable, no network calls needed
+        grid_df = pd.DataFrame(DRIVERS_2026)
+        grid_df["GridPosition"] = 10.0  # estimated midfield; overridden by form below
 
     rows = []
     for _, r in grid_df.iterrows():
-        drv  = r.get("Abbreviation", "UNK")
-        team = r.get("TeamName", "Unknown")
+        drv  = str(r.get("Abbreviation", "UNK"))
+        team = str(r.get("TeamName", "Unknown"))
+        grid = float(r.get("GridPosition", 10.0))
 
-        circuit_hist = hist_df[
-            (hist_df.get("Abbreviation", pd.Series(dtype=str)) == drv)
-            if "Abbreviation" in hist_df.columns else pd.Series([False]*len(hist_df))
-        ] if "EventName" not in hist_df.columns else hist_df[
-            (hist_df["Abbreviation"] == drv) & (hist_df["EventName"] == event_name)
-        ] if "Abbreviation" in hist_df.columns else pd.DataFrame()
+        if not quali_done:
+            # Estimate grid from recent qualifying form
+            form_grid = _latest_stat(hist_df, "Abbreviation", drv, "DriverAvgGridLast5")
+            grid = float(form_grid) if pd.notna(form_grid) else 10.0
 
-        circuit_avg = circuit_hist["Position"].mean() if (
-            not circuit_hist.empty and "Position" in circuit_hist.columns
-        ) else np.nan
+        circuit_avg = np.nan
+        if "Abbreviation" in hist_df.columns and "EventName" in hist_df.columns:
+            ch = hist_df[
+                (hist_df["Abbreviation"] == drv) &
+                (hist_df["EventName"] == event_name)
+            ]
+            if not ch.empty and "Position" in ch.columns:
+                circuit_avg = ch["Position"].mean()
+
         driver_form = _latest_stat(hist_df, "Abbreviation", drv, "DriverAvgFinishLast5")
 
         rows.append({
             "Abbreviation":          drv,
             "TeamName":              team,
-            "GridPosition":          float(r.get("GridPosition", 10)),
+            "GridPosition":          grid,
             "DriverAvgFinishLast5":  driver_form,
             "DriverAvgGridLast5":    _latest_stat(hist_df, "Abbreviation", drv, "DriverAvgGridLast5"),
             "DriverDNFRateLast10":   _latest_stat(hist_df, "Abbreviation", drv, "DriverDNFRateLast10"),
             "DriverPointsCumSeason": _latest_stat(hist_df, "Abbreviation", drv, "DriverPointsCumSeason"),
             "TeamAvgFinishLast5":    _latest_stat(hist_df, "TeamName", team, "TeamAvgFinishLast5"),
             "TeamPointsCumSeason":   _latest_stat(hist_df, "TeamName", team, "TeamPointsCumSeason"),
-            "CircuitAvgFinish":      circuit_avg if pd.notna(circuit_avg) else driver_form,
+            "CircuitAvgFinish":      float(circuit_avg) if pd.notna(circuit_avg) else (driver_form if pd.notna(driver_form) else 10.0),
             "DriverRaceCount":       _latest_stat(hist_df, "Abbreviation", drv, "DriverRaceCount"),
         })
 
@@ -167,8 +137,7 @@ def build_prediction_table(event, hist_df):
 
 
 def make_X(pred_df, features, hist_df):
-    """Build a clean, NaN-free feature matrix for the model."""
-    # Global medians from history as ultimate fallback
+    """Build a clean NaN-free feature matrix."""
     hist_medians = {}
     for col in features:
         if col in hist_df.columns:
