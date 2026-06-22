@@ -37,7 +37,7 @@ div[data-testid="metric-container"] {
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<h1 style='text-align:center;'>🏎️ F1 RACE ANALYTICS</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align:center;'>🏎️ F1 RACE ANALYTICS AND PREDICTIONS</h1>", unsafe_allow_html=True)
 st.markdown("---")
 
 # =====================================================
