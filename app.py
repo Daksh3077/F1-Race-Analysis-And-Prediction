@@ -13,7 +13,7 @@ from predict_upcoming_race import render_prediction_tab
 # PAGE CONFIG
 # =====================================================
 st.set_page_config(
-    page_title="F1 Race Analytics",
+    page_title="F1 Race Analytics and Predictions",
     page_icon="🏎️",
     layout="wide"
 )
