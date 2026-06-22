@@ -13,6 +13,30 @@ from datetime import datetime, timezone
 MODEL_PATH = "f1_race_predictor.pkl"
 HIST_PATH  = "historical_features.parquet"
 
+# ── 2026 driver lineup (fallback if FastF1 data unavailable) ──────────────
+FALLBACK_DRIVERS = [
+    {"Abbreviation": "VER", "TeamName": "Red Bull Racing"},
+    {"Abbreviation": "LAW", "TeamName": "Red Bull Racing"},
+    {"Abbreviation": "NOR", "TeamName": "McLaren"},
+    {"Abbreviation": "PIA", "TeamName": "McLaren"},
+    {"Abbreviation": "LEC", "TeamName": "Ferrari"},
+    {"Abbreviation": "HAM", "TeamName": "Ferrari"},
+    {"Abbreviation": "RUS", "TeamName": "Mercedes"},
+    {"Abbreviation": "ANT", "TeamName": "Mercedes"},
+    {"Abbreviation": "ALO", "TeamName": "Aston Martin"},
+    {"Abbreviation": "STR", "TeamName": "Aston Martin"},
+    {"Abbreviation": "GAS", "TeamName": "Alpine"},
+    {"Abbreviation": "DOO", "TeamName": "Alpine"},
+    {"Abbreviation": "ALB", "TeamName": "Williams"},
+    {"Abbreviation": "SAI", "TeamName": "Williams"},
+    {"Abbreviation": "HUL", "TeamName": "Kick Sauber"},
+    {"Abbreviation": "BOR", "TeamName": "Kick Sauber"},
+    {"Abbreviation": "TSU", "TeamName": "RB"},
+    {"Abbreviation": "HAD", "TeamName": "RB"},
+    {"Abbreviation": "BEA", "TeamName": "Haas F1 Team"},
+    {"Abbreviation": "OCO", "TeamName": "Haas F1 Team"},
+]
+
 
 @st.cache_resource
 def load_predictor():
@@ -36,24 +60,54 @@ def get_next_event(year):
     return upcoming.sort_values("EventDate").iloc[0]
 
 
-def _latest_stat(hist_df, key_col, key_val, col):
-    if col not in hist_df.columns:
-        return np.nan
-    rows = hist_df[hist_df[key_col] == key_val].sort_values(["Year", "Round"])
-    if rows.empty:
-        return np.nan
-    val = rows[col].dropna()
-    return float(val.iloc[-1]) if not val.empty else np.nan
+@st.cache_data(show_spinner=False)
+def get_current_drivers(year, next_round):
+    """
+    Try to get the driver/team list from the most recent completed race.
+    Falls back to FALLBACK_DRIVERS if nothing is available.
+    """
+    try:
+        schedule = fastf1.get_event_schedule(year, include_testing=False)
+        schedule = schedule[schedule["EventFormat"] != "testing"]
+        past = schedule[schedule["RoundNumber"] < next_round].sort_values(
+            "RoundNumber", ascending=False
+        )
+        for _, ev in past.iterrows():
+            try:
+                s = fastf1.get_session(year, int(ev["RoundNumber"]), "R")
+                s.load(laps=False, telemetry=False, weather=False, messages=False)
+                res = s.results[["Abbreviation", "TeamName"]].dropna()
+                if not res.empty:
+                    return res.drop_duplicates("Abbreviation").reset_index(drop=True), False
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return pd.DataFrame(FALLBACK_DRIVERS), False
 
 
 def try_get_grid(year, rnd):
+    """Real qualifying grid if available, else None."""
     try:
         q = fastf1.get_session(year, rnd, "Q")
         q.load(laps=False, telemetry=False, weather=False, messages=False)
         res = q.results[["Abbreviation", "TeamName", "Position"]].copy()
-        return res.rename(columns={"Position": "GridPosition"})
+        res = res.rename(columns={"Position": "GridPosition"})
+        return res.dropna(subset=["Abbreviation"])
     except Exception:
         return None
+
+
+def _latest_stat(hist_df, key_col, key_val, col):
+    if col not in hist_df.columns:
+        return np.nan
+    rows = hist_df[hist_df[key_col] == key_val].sort_values(
+        [c for c in ["Year", "Round"] if c in hist_df.columns]
+    )
+    if rows.empty:
+        return np.nan
+    val = rows[col].dropna()
+    return float(val.iloc[-1]) if not val.empty else np.nan
 
 
 def build_prediction_table(event, hist_df):
@@ -61,30 +115,44 @@ def build_prediction_table(event, hist_df):
     rnd        = int(event["RoundNumber"])
     event_name = event["EventName"]
 
+    # Try real qualifying grid first
     grid_df    = try_get_grid(year, rnd)
     quali_done = grid_df is not None
 
     if not quali_done:
-        latest  = hist_df.sort_values(["Year", "Round"]).groupby("Abbreviation").tail(1)
-        grid_df = latest[["Abbreviation", "TeamName"]].copy()
+        # Get current driver lineup from most recent race
+        drivers_df, _ = get_current_drivers(year, rnd)
+        grid_df = drivers_df.copy()
+        # Estimate grid from recent qualifying form
         grid_df["GridPosition"] = grid_df["Abbreviation"].apply(
             lambda a: _latest_stat(hist_df, "Abbreviation", a, "DriverAvgGridLast5")
         )
+        # Fill any missing grid positions with midfield default
+        grid_df["GridPosition"] = pd.to_numeric(
+            grid_df["GridPosition"], errors="coerce"
+        ).fillna(10.0)
 
     rows = []
     for _, r in grid_df.iterrows():
-        drv, team = r["Abbreviation"], r["TeamName"]
+        drv  = r.get("Abbreviation", "UNK")
+        team = r.get("TeamName", "Unknown")
+
         circuit_hist = hist_df[
-            (hist_df["Abbreviation"] == drv) &
-            (hist_df["EventName"]    == event_name)
-        ]
-        circuit_avg = circuit_hist["Position"].mean() if not circuit_hist.empty else np.nan
+            (hist_df.get("Abbreviation", pd.Series(dtype=str)) == drv)
+            if "Abbreviation" in hist_df.columns else pd.Series([False]*len(hist_df))
+        ] if "EventName" not in hist_df.columns else hist_df[
+            (hist_df["Abbreviation"] == drv) & (hist_df["EventName"] == event_name)
+        ] if "Abbreviation" in hist_df.columns else pd.DataFrame()
+
+        circuit_avg = circuit_hist["Position"].mean() if (
+            not circuit_hist.empty and "Position" in circuit_hist.columns
+        ) else np.nan
         driver_form = _latest_stat(hist_df, "Abbreviation", drv, "DriverAvgFinishLast5")
 
         rows.append({
             "Abbreviation":          drv,
             "TeamName":              team,
-            "GridPosition":          r["GridPosition"],
+            "GridPosition":          float(r.get("GridPosition", 10)),
             "DriverAvgFinishLast5":  driver_form,
             "DriverAvgGridLast5":    _latest_stat(hist_df, "Abbreviation", drv, "DriverAvgGridLast5"),
             "DriverDNFRateLast10":   _latest_stat(hist_df, "Abbreviation", drv, "DriverDNFRateLast10"),
@@ -96,6 +164,34 @@ def build_prediction_table(event, hist_df):
         })
 
     return pd.DataFrame(rows), quali_done
+
+
+def make_X(pred_df, features, hist_df):
+    """Build a clean, NaN-free feature matrix for the model."""
+    # Global medians from history as ultimate fallback
+    hist_medians = {}
+    for col in features:
+        if col in hist_df.columns:
+            m = pd.to_numeric(hist_df[col], errors="coerce").median()
+            hist_medians[col] = float(m) if pd.notna(m) else 10.0
+        else:
+            hist_medians[col] = 10.0
+
+    X_rows = []
+    for _, row in pred_df.iterrows():
+        feature_row = {}
+        for col in features:
+            val = row.get(col, np.nan)
+            try:
+                val = float(val)
+            except (TypeError, ValueError):
+                val = np.nan
+            if pd.isna(val) or np.isinf(val):
+                val = hist_medians[col]
+            feature_row[col] = val
+        X_rows.append(feature_row)
+
+    return pd.DataFrame(X_rows, columns=features)
 
 
 def render_prediction_tab():
@@ -119,46 +215,13 @@ def render_prediction_tab():
 
     with st.spinner("Building prediction..."):
         pred_df, quali_done = build_prediction_table(event, hist_df)
-
-        # Build the feature matrix using ONLY the features the model knows about.
-        # Use historical global medians as fallback for every missing/NaN value.
-        hist_medians = {}
-        for col in features:
-            if col in hist_df.columns:
-                m = pd.to_numeric(hist_df[col], errors="coerce").median()
-                hist_medians[col] = float(m) if pd.notna(m) else 10.0
-            else:
-                hist_medians[col] = 10.0
-
-        X_rows = []
-        for _, row in pred_df.iterrows():
-            feature_row = {}
-            for col in features:
-                val = row.get(col, np.nan)
-                if pd.isna(val) or np.isinf(val):
-                    val = hist_medians[col]
-                feature_row[col] = float(val)
-            X_rows.append(feature_row)
-
-        X = pd.DataFrame(X_rows, columns=features)
-
-        # ── DIAGNOSTIC SECTION ──────────────────────────────────────────
-        # Shows debug info inside the app so we can see the real problem.
-        # We'll remove this block once predictions are working.
-        with st.expander("🔧 Debug info (remove once working)"):
-            st.write("**Model expects these features:**", features)
-            st.write(f"**X shape:** {X.shape}")
-            st.write("**NaN count per column:**", X.isna().sum().to_dict())
-            st.write("**Inf count per column:**",
-                     {c: int(np.isinf(X[c]).sum()) for c in X.columns})
-            st.write("**Sample X (first 3 rows):**", X.head(3))
-        # ── END DIAGNOSTIC ───────────────────────────────────────────────
+        X = make_X(pred_df, features, hist_df)
 
         try:
             pred_df["PredictedPosition"] = model.predict(X)
         except Exception as e:
             st.error(f"Model prediction failed: {e}")
-            st.write("**Full X sent to model:**")
+            st.write("X shape:", X.shape)
             st.dataframe(X)
             return
 
@@ -169,8 +232,8 @@ def render_prediction_tab():
         st.success("✅ Using the actual qualifying grid for this prediction.")
     else:
         st.warning(
-            "⚠️ Qualifying hasn't happened yet — grid is estimated from "
-            "recent form. Re-run after qualifying for a sharper prediction."
+            "⚠️ Qualifying hasn't happened yet — grid estimated from recent form. "
+            "Reload after qualifying for a sharper prediction."
         )
 
     st.dataframe(
@@ -195,10 +258,9 @@ def render_prediction_tab():
     st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("#### 🏆 Predicted Podium")
-    podium = pred_df.head(3)
-    medals = ["🥇", "🥈", "🥉"]
     cols   = st.columns(3)
-    for col, (_, row), medal in zip(cols, podium.iterrows(), medals):
+    medals = ["🥇", "🥈", "🥉"]
+    for col, (_, row), medal in zip(cols, pred_df.head(3).iterrows(), medals):
         with col:
             st.markdown(f"""
             <div style="background:#151515;padding:16px;border-radius:12px;
