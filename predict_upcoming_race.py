@@ -31,7 +31,7 @@ def load_historical_features():
 def get_next_event(year):
     schedule = fastf1.get_event_schedule(year, include_testing=False)
     schedule = schedule[schedule["EventFormat"] != "testing"]
-    now = pd.Timestamp.now()          # timezone-naive to match EventDate
+    now = pd.Timestamp.now()   # timezone-naive to match EventDate
     upcoming = schedule[schedule["EventDate"] >= now]
     if upcoming.empty:
         return None
@@ -39,24 +39,23 @@ def get_next_event(year):
 
 
 def _latest_stat(hist_df, key_col, key_val, col):
-    """Get the most recent value of `col` for a given key, with fallback."""
+    """Most recent non-null value of col for a given key, or NaN."""
     if col not in hist_df.columns:
         return np.nan
     rows = hist_df[hist_df[key_col] == key_val].sort_values(["Year", "Round"])
     if rows.empty:
         return np.nan
     val = rows[col].dropna()
-    return val.iloc[-1] if not val.empty else np.nan
+    return float(val.iloc[-1]) if not val.empty else np.nan
 
 
 def try_get_grid(year, rnd):
-    """Returns real grid from qualifying if it has happened, else None."""
+    """Real grid positions from qualifying, or None if not held yet."""
     try:
         q = fastf1.get_session(year, rnd, "Q")
         q.load(laps=False, telemetry=False, weather=False, messages=False)
         res = q.results[["Abbreviation", "TeamName", "Position"]].copy()
-        res = res.rename(columns={"Position": "GridPosition"})
-        return res
+        return res.rename(columns={"Position": "GridPosition"})
     except Exception:
         return None
 
@@ -84,24 +83,57 @@ def build_prediction_table(event, hist_df):
             (hist_df["Abbreviation"] == drv) &
             (hist_df["EventName"]    == event_name)
         ]
-        circuit_avg  = circuit_hist["Position"].mean() if not circuit_hist.empty else np.nan
-        driver_form  = _latest_stat(hist_df, "Abbreviation", drv, "DriverAvgFinishLast5")
+        circuit_avg = circuit_hist["Position"].mean() if not circuit_hist.empty else np.nan
+        driver_form = _latest_stat(hist_df, "Abbreviation", drv, "DriverAvgFinishLast5")
 
         rows.append({
-            "Abbreviation":         drv,
-            "TeamName":             team,
-            "GridPosition":         r["GridPosition"],
-            "DriverAvgFinishLast5": driver_form,
-            "DriverAvgGridLast5":   _latest_stat(hist_df, "Abbreviation", drv, "DriverAvgGridLast5"),
-            "DriverDNFRateLast10":  _latest_stat(hist_df, "Abbreviation", drv, "DriverDNFRateLast10"),
-            "DriverPointsCumSeason":_latest_stat(hist_df, "Abbreviation", drv, "DriverPointsCumSeason"),
-            "TeamAvgFinishLast5":   _latest_stat(hist_df, "TeamName", team, "TeamAvgFinishLast5"),
-            "TeamPointsCumSeason":  _latest_stat(hist_df, "TeamName", team, "TeamPointsCumSeason"),
-            "CircuitAvgFinish":     circuit_avg if pd.notna(circuit_avg) else driver_form,
-            "DriverRaceCount":      _latest_stat(hist_df, "Abbreviation", drv, "DriverRaceCount"),
+            "Abbreviation":          drv,
+            "TeamName":              team,
+            "GridPosition":          r["GridPosition"],
+            "DriverAvgFinishLast5":  driver_form,
+            "DriverAvgGridLast5":    _latest_stat(hist_df, "Abbreviation", drv, "DriverAvgGridLast5"),
+            "DriverDNFRateLast10":   _latest_stat(hist_df, "Abbreviation", drv, "DriverDNFRateLast10"),
+            "DriverPointsCumSeason": _latest_stat(hist_df, "Abbreviation", drv, "DriverPointsCumSeason"),
+            "TeamAvgFinishLast5":    _latest_stat(hist_df, "TeamName", team, "TeamAvgFinishLast5"),
+            "TeamPointsCumSeason":   _latest_stat(hist_df, "TeamName", team, "TeamPointsCumSeason"),
+            "CircuitAvgFinish":      circuit_avg if pd.notna(circuit_avg) else driver_form,
+            "DriverRaceCount":       _latest_stat(hist_df, "Abbreviation", drv, "DriverRaceCount"),
         })
 
     return pd.DataFrame(rows), quali_done
+
+
+def clean_features(pred_df, features, hist_df):
+    """
+    Guarantee every feature column exists, is numeric, and has no NaN/inf.
+    Falls back: column median → historical median → sensible default (10).
+    """
+    # Global fallback defaults derived from historical data
+    hist_medians = {}
+    for col in features:
+        if col in hist_df.columns:
+            m = pd.to_numeric(hist_df[col], errors="coerce").median()
+            hist_medians[col] = m if pd.notna(m) else 10.0
+        else:
+            hist_medians[col] = 10.0
+
+    for col in features:
+        if col not in pred_df.columns:
+            pred_df[col] = hist_medians[col]
+        else:
+            pred_df[col] = pd.to_numeric(pred_df[col], errors="coerce")
+            local_median = pred_df[col].median()
+            fallback     = local_median if pd.notna(local_median) else hist_medians[col]
+            pred_df[col] = pred_df[col].fillna(fallback)
+
+    # Final hard safety net — replace any remaining NaN / inf with column default
+    X = pred_df[features].copy().astype(float)
+    X = X.replace([np.inf, -np.inf], np.nan)
+    for col in features:
+        if X[col].isna().any():
+            X[col] = X[col].fillna(hist_medians[col])
+
+    return pred_df, X
 
 
 def render_prediction_tab():
@@ -128,27 +160,9 @@ def render_prediction_tab():
 
     with st.spinner("Building prediction..."):
         pred_df, quali_done = build_prediction_table(event, hist_df)
+        pred_df, X          = clean_features(pred_df, features, hist_df)
 
-        # Ensure every feature the model expects exists in pred_df
-        # If a column is missing, fill it with the column median from
-        # historical data (or a sensible midfield default of 10).
-        for col in features:
-            if col not in pred_df.columns:
-                # try to get a global median from history
-                if col in hist_df.columns:
-                    pred_df[col] = hist_df[col].median()
-                else:
-                    pred_df[col] = 10.0   # sensible midfield default
-            else:
-                # fill NaNs within the column
-                median_val = pred_df[col].median()
-                if pd.isna(median_val) and col in hist_df.columns:
-                    median_val = hist_df[col].median()
-                if pd.isna(median_val):
-                    median_val = 10.0
-                pred_df[col] = pred_df[col].fillna(median_val)
-
-        pred_df["PredictedPosition"] = model.predict(pred_df[features])
+        pred_df["PredictedPosition"] = model.predict(X)
         pred_df = pred_df.sort_values("PredictedPosition").reset_index(drop=True)
         pred_df["PredictedRank"] = range(1, len(pred_df) + 1)
 
@@ -163,8 +177,11 @@ def render_prediction_tab():
     # Results table
     st.dataframe(
         pred_df[["PredictedRank", "Abbreviation", "TeamName", "GridPosition", "PredictedPosition"]]
-        .rename(columns={"Abbreviation": "Driver", "GridPosition": "Grid",
-                         "PredictedPosition": "Predicted Score (lower = better)"}),
+        .rename(columns={
+            "Abbreviation":      "Driver",
+            "GridPosition":      "Grid",
+            "PredictedPosition": "Predicted Score (lower = better)"
+        }),
         use_container_width=True,
         hide_index=True,
     )
