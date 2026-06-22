@@ -5,7 +5,7 @@ Analyze past races. Predict the next one. All in one dashboard.
 
 
 
-Live App → f1-race-analysis3077.streamlit.app
+Live App → https://f1-race-analysis-and-predictions.streamlit.app/
 
 
 What is this?
