@@ -39,7 +39,7 @@ def load_historical_features():
 def get_next_event(year):
     schedule = fastf1.get_event_schedule(year, include_testing=False)
     schedule = schedule[schedule["EventFormat"] != "testing"]
-    now = pd.Timestamp.now(tz="UTC")
+    now = pd.Timestamp.now()
     upcoming = schedule[schedule["EventDate"] >= now]
     if upcoming.empty:
         return None
