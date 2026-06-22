@@ -1,7 +1,5 @@
 """
 Pre-race finishing-order prediction tab.
-Drop this file next to app.py in your repo.
-Requires f1_race_predictor.pkl and historical_features.parquet in the repo root.
 """
 
 import streamlit as st
@@ -31,7 +29,7 @@ def load_historical_features():
 def get_next_event(year):
     schedule = fastf1.get_event_schedule(year, include_testing=False)
     schedule = schedule[schedule["EventFormat"] != "testing"]
-    now = pd.Timestamp.now()   # timezone-naive to match EventDate
+    now = pd.Timestamp.now()
     upcoming = schedule[schedule["EventDate"] >= now]
     if upcoming.empty:
         return None
@@ -39,7 +37,6 @@ def get_next_event(year):
 
 
 def _latest_stat(hist_df, key_col, key_val, col):
-    """Most recent non-null value of col for a given key, or NaN."""
     if col not in hist_df.columns:
         return np.nan
     rows = hist_df[hist_df[key_col] == key_val].sort_values(["Year", "Round"])
@@ -50,7 +47,6 @@ def _latest_stat(hist_df, key_col, key_val, col):
 
 
 def try_get_grid(year, rnd):
-    """Real grid positions from qualifying, or None if not held yet."""
     try:
         q = fastf1.get_session(year, rnd, "Q")
         q.load(laps=False, telemetry=False, weather=False, messages=False)
@@ -78,7 +74,6 @@ def build_prediction_table(event, hist_df):
     rows = []
     for _, r in grid_df.iterrows():
         drv, team = r["Abbreviation"], r["TeamName"]
-
         circuit_hist = hist_df[
             (hist_df["Abbreviation"] == drv) &
             (hist_df["EventName"]    == event_name)
@@ -103,39 +98,6 @@ def build_prediction_table(event, hist_df):
     return pd.DataFrame(rows), quali_done
 
 
-def clean_features(pred_df, features, hist_df):
-    """
-    Guarantee every feature column exists, is numeric, and has no NaN/inf.
-    Falls back: column median → historical median → sensible default (10).
-    """
-    # Global fallback defaults derived from historical data
-    hist_medians = {}
-    for col in features:
-        if col in hist_df.columns:
-            m = pd.to_numeric(hist_df[col], errors="coerce").median()
-            hist_medians[col] = m if pd.notna(m) else 10.0
-        else:
-            hist_medians[col] = 10.0
-
-    for col in features:
-        if col not in pred_df.columns:
-            pred_df[col] = hist_medians[col]
-        else:
-            pred_df[col] = pd.to_numeric(pred_df[col], errors="coerce")
-            local_median = pred_df[col].median()
-            fallback     = local_median if pd.notna(local_median) else hist_medians[col]
-            pred_df[col] = pred_df[col].fillna(fallback)
-
-    # Final hard safety net — replace any remaining NaN / inf with column default
-    X = pred_df[features].copy().astype(float)
-    X = X.replace([np.inf, -np.inf], np.nan)
-    for col in features:
-        if X[col].isna().any():
-            X[col] = X[col].fillna(hist_medians[col])
-
-    return pred_df, X
-
-
 def render_prediction_tab():
     st.subheader("🔮 UPCOMING RACE PREDICTION")
 
@@ -143,10 +105,7 @@ def render_prediction_tab():
         model, features = load_predictor()
         hist_df         = load_historical_features()
     except Exception as e:
-        st.error(
-            f"Prediction model not found. Run train_race_predictor.py "
-            f"and commit the resulting files to your repo. ({e})"
-        )
+        st.error(f"Could not load model/data: {e}")
         return
 
     year  = datetime.now(timezone.utc).year
@@ -160,9 +119,49 @@ def render_prediction_tab():
 
     with st.spinner("Building prediction..."):
         pred_df, quali_done = build_prediction_table(event, hist_df)
-        pred_df, X          = clean_features(pred_df, features, hist_df)
 
-        pred_df["PredictedPosition"] = model.predict(X)
+        # Build the feature matrix using ONLY the features the model knows about.
+        # Use historical global medians as fallback for every missing/NaN value.
+        hist_medians = {}
+        for col in features:
+            if col in hist_df.columns:
+                m = pd.to_numeric(hist_df[col], errors="coerce").median()
+                hist_medians[col] = float(m) if pd.notna(m) else 10.0
+            else:
+                hist_medians[col] = 10.0
+
+        X_rows = []
+        for _, row in pred_df.iterrows():
+            feature_row = {}
+            for col in features:
+                val = row.get(col, np.nan)
+                if pd.isna(val) or np.isinf(val):
+                    val = hist_medians[col]
+                feature_row[col] = float(val)
+            X_rows.append(feature_row)
+
+        X = pd.DataFrame(X_rows, columns=features)
+
+        # ── DIAGNOSTIC SECTION ──────────────────────────────────────────
+        # Shows debug info inside the app so we can see the real problem.
+        # We'll remove this block once predictions are working.
+        with st.expander("🔧 Debug info (remove once working)"):
+            st.write("**Model expects these features:**", features)
+            st.write(f"**X shape:** {X.shape}")
+            st.write("**NaN count per column:**", X.isna().sum().to_dict())
+            st.write("**Inf count per column:**",
+                     {c: int(np.isinf(X[c]).sum()) for c in X.columns})
+            st.write("**Sample X (first 3 rows):**", X.head(3))
+        # ── END DIAGNOSTIC ───────────────────────────────────────────────
+
+        try:
+            pred_df["PredictedPosition"] = model.predict(X)
+        except Exception as e:
+            st.error(f"Model prediction failed: {e}")
+            st.write("**Full X sent to model:**")
+            st.dataframe(X)
+            return
+
         pred_df = pred_df.sort_values("PredictedPosition").reset_index(drop=True)
         pred_df["PredictedRank"] = range(1, len(pred_df) + 1)
 
@@ -174,7 +173,6 @@ def render_prediction_tab():
             "recent form. Re-run after qualifying for a sharper prediction."
         )
 
-    # Results table
     st.dataframe(
         pred_df[["PredictedRank", "Abbreviation", "TeamName", "GridPosition", "PredictedPosition"]]
         .rename(columns={
@@ -186,7 +184,6 @@ def render_prediction_tab():
         hide_index=True,
     )
 
-    # Bar chart
     fig = px.bar(
         pred_df, x="Abbreviation", y="PredictedPosition",
         color="TeamName", template="plotly_dark",
@@ -197,7 +194,6 @@ def render_prediction_tab():
     fig.update_layout(paper_bgcolor="#0a0a0a", plot_bgcolor="#0a0a0a", font_color="white")
     st.plotly_chart(fig, use_container_width=True)
 
-    # Podium cards
     st.markdown("#### 🏆 Predicted Podium")
     podium = pred_df.head(3)
     medals = ["🥇", "🥈", "🥉"]
