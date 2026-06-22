@@ -16,7 +16,7 @@ HIST_PATH  = "historical_features.parquet"
 # 2026 F1 driver lineup — used when qualifying hasn't happened yet
 DRIVERS_2026 = [
     {"Abbreviation": "VER", "TeamName": "Red Bull Racing"},
-    {"Abbreviation": "LAW", "TeamName": "Red Bull Racing"},
+    {"Abbreviation": "HAD", "TeamName": "Red Bull Racing"},
     {"Abbreviation": "NOR", "TeamName": "McLaren"},
     {"Abbreviation": "PIA", "TeamName": "McLaren"},
     {"Abbreviation": "LEC", "TeamName": "Ferrari"},
@@ -29,12 +29,15 @@ DRIVERS_2026 = [
     {"Abbreviation": "DOO", "TeamName": "Alpine"},
     {"Abbreviation": "ALB", "TeamName": "Williams"},
     {"Abbreviation": "SAI", "TeamName": "Williams"},
-    {"Abbreviation": "HUL", "TeamName": "Kick Sauber"},
-    {"Abbreviation": "BOR", "TeamName": "Kick Sauber"},
-    {"Abbreviation": "TSU", "TeamName": "RB"},
-    {"Abbreviation": "HAD", "TeamName": "RB"},
+    {"Abbreviation": "HUL", "TeamName": "Audi"},
+    {"Abbreviation": "BOR", "TeamName": "Audi"},
+    {"Abbreviation": "ARV", "TeamName": "RB"},
+    {"Abbreviation": "LAW", "TeamName": "RB"},
     {"Abbreviation": "BEA", "TeamName": "Haas F1 Team"},
     {"Abbreviation": "OCO", "TeamName": "Haas F1 Team"},
+    {"Abbreviation": "PER", "TeamName": "Cadillac"},
+    {"Abbreviation": "BOT", "TeamName": "Cadillac"},
+    
 ]
 
 
