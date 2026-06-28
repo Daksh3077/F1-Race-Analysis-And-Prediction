@@ -16,7 +16,7 @@ HIST_PATH  = "historical_features.parquet"
 # 2026 F1 driver lineup — used when qualifying hasn't happened yet
 DRIVERS_2026 = [
     {"Abbreviation": "VER", "TeamName": "Red Bull Racing"},
-    {"Abbreviation": "HAD", "TeamName": "Red Bull Racing"},
+    {"Abbreviation": "LAW", "TeamName": "Red Bull Racing"},
     {"Abbreviation": "NOR", "TeamName": "McLaren"},
     {"Abbreviation": "PIA", "TeamName": "McLaren"},
     {"Abbreviation": "LEC", "TeamName": "Ferrari"},
@@ -29,15 +29,12 @@ DRIVERS_2026 = [
     {"Abbreviation": "DOO", "TeamName": "Alpine"},
     {"Abbreviation": "ALB", "TeamName": "Williams"},
     {"Abbreviation": "SAI", "TeamName": "Williams"},
-    {"Abbreviation": "HUL", "TeamName": "Audi"},
-    {"Abbreviation": "BOR", "TeamName": "Audi"},
-    {"Abbreviation": "ARV", "TeamName": "RB"},
-    {"Abbreviation": "LAW", "TeamName": "RB"},
+    {"Abbreviation": "HUL", "TeamName": "Kick Sauber"},
+    {"Abbreviation": "BOR", "TeamName": "Kick Sauber"},
+    {"Abbreviation": "TSU", "TeamName": "RB"},
+    {"Abbreviation": "HAD", "TeamName": "RB"},
     {"Abbreviation": "BEA", "TeamName": "Haas F1 Team"},
     {"Abbreviation": "OCO", "TeamName": "Haas F1 Team"},
-    {"Abbreviation": "PER", "TeamName": "Cadillac"},
-    {"Abbreviation": "BOT", "TeamName": "Cadillac"},
-    
 ]
 
 
@@ -56,8 +53,10 @@ def load_historical_features():
 def get_next_event(year):
     schedule = fastf1.get_event_schedule(year, include_testing=False)
     schedule = schedule[schedule["EventFormat"] != "testing"]
-    now = pd.Timestamp.now()
-    upcoming = schedule[schedule["EventDate"] >= now]
+    # Compare dates only (not timestamps) so today's race still shows
+    # as "upcoming" even if we're past midnight on race day.
+    today = pd.Timestamp.now().normalize()
+    upcoming = schedule[schedule["EventDate"].dt.normalize() >= today]
     if upcoming.empty:
         return None
     return upcoming.sort_values("EventDate").iloc[0]
