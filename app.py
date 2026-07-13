@@ -6,6 +6,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import joblib
 import os
+import time
 
 from predict_upcoming_race import render_prediction_tab
 
@@ -13,7 +14,7 @@ from predict_upcoming_race import render_prediction_tab
 # PAGE CONFIG
 # =====================================================
 st.set_page_config(
-    page_title="F1 Race Analytics and Predictions",
+    page_title="F1 Race Analytics",
     page_icon="🏎️",
     layout="wide"
 )
@@ -37,25 +38,25 @@ div[data-testid="metric-container"] {
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<h1 style='text-align:center;'>🏎️ F1 RACE ANALYTICS AND PREDICTIONS</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align:center;'>🏎️ F1 RACE ANALYTICS</h1>", unsafe_allow_html=True)
 st.markdown("---")
 
 # =====================================================
-# TABS — Live Analysis (existing) + Prediction (new)
+# TABS
 # =====================================================
 tab_live, tab_predict = st.tabs(["📊 Live Race Analysis", "🔮 Predict Upcoming Race"])
 
 with tab_live:
 
     # =====================================================
-    # FASTF1 CACHE
+    # FASTF1 CACHE + TIMEOUT
     # =====================================================
     os.makedirs("cache", exist_ok=True)
     fastf1.Cache.enable_cache("cache")
+    os.environ["FASTF1_TIMEOUT"] = "60"
 
     # =====================================================
-    # HELPER — plain feature engineering (no st.cache_data,
-    # called only after a fresh session load)
+    # FEATURE ENGINEERING
     # =====================================================
     def engineer_features(laps):
         df = laps.copy().reset_index(drop=True)
@@ -81,17 +82,15 @@ with tab_live:
         return df.fillna(0)
 
     # =====================================================
-    # LOAD MODEL
+    # LOAD OVERTAKE MODEL
     # =====================================================
     MODEL_PATH = "f1_overtake_model.pkl"
 
     @st.cache_resource
     def load_model():
-        print("Files in directory:", os.listdir("."))
         if os.path.exists(MODEL_PATH):
             return joblib.load(MODEL_PATH)
         else:
-            st.error(f"Model file not found: {MODEL_PATH}")
             return None
 
     try:
@@ -102,7 +101,7 @@ with tab_live:
         st.error(f"Error loading model: {e}")
 
     # =====================================================
-    # RACE CALENDAR (cached by year — pure/serialisable)
+    # RACE CALENDAR
     # =====================================================
     @st.cache_data(show_spinner=False)
     def get_event_schedule(year):
@@ -122,40 +121,53 @@ with tab_live:
             race_names = schedule_df["EventName"].tolist()
         except Exception as e:
             st.sidebar.error(f"Could not load calendar: {e}")
-            race_names = ["Bahrain"]
+            race_names = ["Bahrain Grand Prix"]
 
     race = st.sidebar.selectbox("Grand Prix", race_names)
 
     # =====================================================
-    # SESSION LOADING — keyed by (year, race) in session_state
+    # SESSION LOADING — with retry logic
     # =====================================================
     session_key = f"{year}_{race}"
 
     if st.session_state.get("session_key") != session_key:
-        with st.spinner(f"Loading {year} {race} race data… (first load may take a minute)"):
-            try:
-                session = fastf1.get_session(year, race, "R")
-                session.load(laps=True, telemetry=True, weather=True, messages=False)
-                df = engineer_features(session.laps)
-                st.session_state["session_key"] = session_key
-                st.session_state["session"] = session
-                st.session_state["df"] = df
-            except Exception as e:
-                st.error(f"❌ Could not load session: {e}")
-                st.stop()
+        max_attempts = 3
+        loaded = False
+        for attempt in range(max_attempts):
+            label = f"Loading {year} {race} data… (attempt {attempt+1}/{max_attempts})"
+            with st.spinner(label):
+                try:
+                    session = fastf1.get_session(year, race, "R")
+                    session.load(laps=True, telemetry=True, weather=True, messages=False)
+                    df = engineer_features(session.laps)
+                    st.session_state["session_key"] = session_key
+                    st.session_state["session"] = session
+                    st.session_state["df"] = df
+                    loaded = True
+                    break
+                except Exception as e:
+                    if attempt < max_attempts - 1:
+                        st.warning(f"⚠️ Attempt {attempt+1} failed — retrying in 3s… ({e})")
+                        time.sleep(3)
+                    else:
+                        st.error(
+                            f"❌ Could not load session after {max_attempts} attempts: {e}\n\n"
+                            "💡 Try selecting a different race or refreshing the page."
+                        )
+                        st.stop()
     else:
         session = st.session_state["session"]
         df = st.session_state["df"]
 
     # =====================================================
-    # DYNAMIC DRIVER LIST
+    # DRIVER LIST
     # =====================================================
     all_drivers = sorted(df["Driver"].dropna().unique().tolist())
     st.sidebar.markdown("---")
     driver_choice = st.sidebar.selectbox("Telemetry Driver", all_drivers, index=0)
 
     # =====================================================
-    # TELEMETRY HELPERS (keyed by race + driver — never hash session)
+    # TELEMETRY HELPERS
     # =====================================================
     def get_telemetry_one(driver):
         key = f"tel_{session_key}_{driver}"
@@ -194,11 +206,10 @@ with tab_live:
     # TOP METRICS
     # =====================================================
     col1, col2, col3, col4 = st.columns(4)
-
-    leader = latest.sort_values("Position").iloc[0]["Driver"]
+    leader       = latest.sort_values("Position").iloc[0]["Driver"]
     highest_prob = round(latest["OvertakeProbability"].max(), 2) if model_loaded else "N/A"
-    avg_prob = round(latest["OvertakeProbability"].mean(), 2) if model_loaded else "N/A"
-    current_lap = int(latest["LapNumber"].max())
+    avg_prob     = round(latest["OvertakeProbability"].mean(), 2) if model_loaded else "N/A"
+    current_lap  = int(latest["LapNumber"].max())
 
     with col1: st.metric("🏁 Race Leader", leader)
     with col2: st.metric("🔥 Highest Overtake %", highest_prob)
@@ -314,7 +325,7 @@ with tab_live:
     st.markdown("---")
 
     # =====================================================
-    # DRIVER vs DRIVER — FULL RACE COMPARISON
+    # DRIVER vs DRIVER
     # =====================================================
     st.subheader("⚔️ DRIVER vs DRIVER — FULL RACE COMPARISON")
 
@@ -330,7 +341,6 @@ with tab_live:
         d1_df = df[df["Driver"] == driver1]
         d2_df = df[df["Driver"] == driver2]
 
-        # Lap times
         st.markdown("#### 📉 Lap Time Battle")
         lt_fig = go.Figure()
         lt_fig.add_trace(go.Scatter(x=d1_df["LapNumber"], y=d1_df["LapTimeSeconds"],
@@ -343,7 +353,6 @@ with tab_live:
                               xaxis_title="Lap Number", yaxis_title="Lap Time (s)")
         st.plotly_chart(lt_fig, use_container_width=True)
 
-        # Position battle
         st.markdown("#### 🏁 Position Battle")
         pf = go.Figure()
         pf.add_trace(go.Scatter(x=d1_df["LapNumber"], y=d1_df["Position"],
@@ -357,7 +366,6 @@ with tab_live:
                           xaxis_title="Lap Number", yaxis_title="Position")
         st.plotly_chart(pf, use_container_width=True)
 
-        # Tyre strategy
         st.markdown("#### 🛞 Tyre Strategy")
         COMPOUND_COLORS = {
             "SOFT": "#e8002d", "MEDIUM": "#ffd700", "HARD": "#f0f0f0",
@@ -367,7 +375,8 @@ with tab_live:
         for col, drv, drv_df in [(sc1, driver1, d1_df), (sc2, driver2, d2_df)]:
             stints = (
                 drv_df.groupby("Stint")
-                .agg(LapStart=("LapNumber", "min"), LapEnd=("LapNumber", "max"), Compound=("Compound", "first"))
+                .agg(LapStart=("LapNumber", "min"), LapEnd=("LapNumber", "max"),
+                     Compound=("Compound", "first"))
                 .reset_index()
             )
             sf = go.Figure()
@@ -387,7 +396,6 @@ with tab_live:
             with col:
                 st.plotly_chart(sf, use_container_width=True)
 
-        # Sector times
         st.markdown("#### ⚡ Average Sector Times")
         sec_cmp = go.Figure()
         for drv, drv_df, color in [(driver1, d1_df, "#ff1e00"), (driver2, d2_df, "#00d2ff")]:
@@ -400,10 +408,10 @@ with tab_live:
             ))
         sec_cmp.update_layout(barmode="group", template="plotly_dark",
                                paper_bgcolor="#0a0a0a", plot_bgcolor="#0a0a0a", font_color="white",
-                               title=f"{driver1} vs {driver2} — Avg Sector Times (s)", yaxis_title="Time (s)")
+                               title=f"{driver1} vs {driver2} — Avg Sector Times (s)",
+                               yaxis_title="Time (s)")
         st.plotly_chart(sec_cmp, use_container_width=True)
 
-        # Telemetry overlay
         st.markdown("#### 🏎️ Fastest Lap Speed Trace Overlay")
         with st.spinner("Loading comparison telemetry…"):
             try:
@@ -421,22 +429,21 @@ with tab_live:
             except Exception as e:
                 st.error(f"Telemetry overlay unavailable: {e}")
 
-        # Head-to-head summary cards
         st.markdown("#### 📋 Head-to-Head Race Summary")
         hc1, hc2 = st.columns(2)
         for col, drv, drv_df, color in [
             (hc1, driver1, d1_df, "#ff1e00"),
             (hc2, driver2, d2_df, "#00d2ff")
         ]:
-            last = drv_df.sort_values("LapNumber").iloc[-1]
-            best = drv_df["LapTimeSeconds"].replace(0, np.nan).min()
-            avg = drv_df["LapTimeSeconds"].replace(0, np.nan).mean()
-            gained = int(drv_df.sort_values("LapNumber").iloc[0]["Position"] - last["Position"])
-            compounds = ", ".join(drv_df["Compound"].dropna().unique())
-
+            last     = drv_df.sort_values("LapNumber").iloc[-1]
+            best     = drv_df["LapTimeSeconds"].replace(0, np.nan).min()
+            avg      = drv_df["LapTimeSeconds"].replace(0, np.nan).mean()
+            gained   = int(drv_df.sort_values("LapNumber").iloc[0]["Position"] - last["Position"])
+            compounds= ", ".join(drv_df["Compound"].dropna().unique())
             with col:
                 st.markdown(f"""
-                <div style="background:#151515;padding:16px;border-radius:12px;border-left:5px solid {color};">
+                <div style="background:#151515;padding:16px;border-radius:12px;
+                            border-left:5px solid {color};">
                     <h3 style="color:white;">{drv}</h3>
                     <p style="color:#ccc;">Finish Position: <b>{int(last['Position'])}</b></p>
                     <p style="color:#ccc;">Best Lap: <b>{round(best,3) if not np.isnan(best) else 'N/A'}s</b></p>
@@ -454,10 +461,13 @@ with tab_live:
     try:
         weather = session.weather_data
         wf = go.Figure()
-        wf.add_trace(go.Scatter(x=weather["Time"], y=weather["AirTemp"], mode="lines", name="Air Temp"))
-        wf.add_trace(go.Scatter(x=weather["Time"], y=weather["TrackTemp"], mode="lines", name="Track Temp"))
+        wf.add_trace(go.Scatter(x=weather["Time"], y=weather["AirTemp"],
+                                 mode="lines", name="Air Temp"))
+        wf.add_trace(go.Scatter(x=weather["Time"], y=weather["TrackTemp"],
+                                 mode="lines", name="Track Temp"))
         wf.update_layout(template="plotly_dark", paper_bgcolor="#0a0a0a",
-                          plot_bgcolor="#0a0a0a", font_color="white", title="Track Temperature Analysis")
+                          plot_bgcolor="#0a0a0a", font_color="white",
+                          title="Track Temperature Analysis")
         st.plotly_chart(wf, use_container_width=True)
     except Exception:
         st.info("Weather data not available for this session.")
@@ -467,10 +477,9 @@ with tab_live:
     # =====================================================
     if model_loaded:
         st.subheader("🤖 AI RACE INSIGHTS")
-        top = latest.sort_values("OvertakeProbability", ascending=False).iloc[0]
-        bottom = latest.sort_values("OvertakeProbability").iloc[0]
+        top        = latest.sort_values("OvertakeProbability", ascending=False).iloc[0]
+        bottom     = latest.sort_values("OvertakeProbability").iloc[0]
         leader_drv = latest.sort_values("Position").iloc[0]["Driver"]
-
         st.success(f"🔥 {top['Driver']} has the highest overtake probability at {round(top['OvertakeProbability'],2)}%")
         st.info(f"🛞 {bottom['Driver']} currently has the lowest overtake probability at {round(bottom['OvertakeProbability'],2)}%")
         st.warning(f"🏁 Current race leader: {leader_drv}")
