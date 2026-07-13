@@ -54,6 +54,7 @@ with tab_live:
     os.makedirs("cache", exist_ok=True)
     fastf1.Cache.enable_cache("cache")
     os.environ["FASTF1_TIMEOUT"] = "60"
+    fastf1.set_log_level("WARNING")
 
     # =====================================================
     # FEATURE ENGINEERING
@@ -132,27 +133,37 @@ with tab_live:
 
     if st.session_state.get("session_key") != session_key:
         max_attempts = 3
-        loaded = False
         for attempt in range(max_attempts):
             label = f"Loading {year} {race} data… (attempt {attempt+1}/{max_attempts})"
             with st.spinner(label):
                 try:
                     session = fastf1.get_session(year, race, "R")
                     session.load(laps=True, telemetry=True, weather=True, messages=False)
-                    df = engineer_features(session.laps)
+
+                    laps = session.laps
+                    if laps is None or len(laps) == 0:
+                        raise ValueError("Laps data empty after load")
+
+                    df = engineer_features(laps)
+                    if df.empty:
+                        raise ValueError("No valid laps after feature engineering")
+
                     st.session_state["session_key"] = session_key
                     st.session_state["session"] = session
                     st.session_state["df"] = df
-                    loaded = True
                     break
                 except Exception as e:
                     if attempt < max_attempts - 1:
-                        st.warning(f"⚠️ Attempt {attempt+1} failed — retrying in 3s… ({e})")
-                        time.sleep(3)
+                        st.warning(f"⚠️ Attempt {attempt+1} failed — retrying in 5s… ({e})")
+                        time.sleep(5)
                     else:
                         st.error(
-                            f"❌ Could not load session after {max_attempts} attempts: {e}\n\n"
-                            "💡 Try selecting a different race or refreshing the page."
+                            f"❌ Could not load session after {max_attempts} attempts.\n\n"
+                            f"**Error:** {e}\n\n"
+                            "💡 **Try these fixes:**\n"
+                            "- Pick a different season (2022 or 2023 tend to be most reliable)\n"
+                            "- Refresh the page and try again\n"
+                            "- Wait a minute and retry — F1's data servers are sometimes slow"
                         )
                         st.stop()
     else:
