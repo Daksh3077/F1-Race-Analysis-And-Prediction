@@ -138,7 +138,7 @@ with tab_live:
             with st.spinner(label):
                 try:
                     session = fastf1.get_session(year, race, "R")
-                    session.load(laps=True, telemetry=True, weather=True, messages=False)
+                    session.load(laps=True, telemetry=False, weather=True, messages=False)
 
                     laps = session.laps
                     if laps is None or len(laps) == 0:
