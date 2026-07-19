@@ -44,7 +44,7 @@ st.markdown("---")
 # =====================================================
 # TABS
 # =====================================================
-tab_live, tab_predict = st.tabs(["📊 Live Race Analysis", "🔮 Predict Upcoming Race"])
+tab_live, tab_predict = st.tabs(["📊 Race Analysis", "🔮 Predict Upcoming Race"])
 
 with tab_live:
 
