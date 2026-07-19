@@ -232,7 +232,7 @@ with tab_live:
     # =====================================================
     # LIVE TABLE
     # =====================================================
-    st.subheader("📊 LIVE OVERTAKE PROBABILITIES")
+    st.subheader("📊 OVERTAKE PROBABILITIES")
     table = (
         latest[["Driver", "Position", "Compound", "TyreLife", "OvertakeProbability"]]
         .sort_values("OvertakeProbability", ascending=False)
@@ -498,7 +498,7 @@ with tab_live:
     # =====================================================
     # LIVE LEADERBOARD
     # =====================================================
-    st.subheader("🏆 LIVE LEADERBOARD")
+    st.subheader("🏆 RACE LEADERBOARD")
     for _, row in latest.sort_values("Position").iterrows():
         prob_txt = f"| Overtake Probability: {round(row['OvertakeProbability'],2)}%" if model_loaded else ""
         st.markdown(f"""
